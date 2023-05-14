@@ -20,6 +20,8 @@
 #include <random>
 #include <map>
 #include <unordered_map>
+#include <unordered_set>
+#include <optional>
 #include <queue>
 #include <cassert>
 #include <cstring>
@@ -32,6 +34,7 @@
 #include <mutex>
 #include <sstream>
 #include <numeric>
+#include <utility>
 
 #define LLAMA_USE_SCRATCH
 #define LLAMA_MAX_SCRATCH_BUFFERS 16
@@ -200,6 +203,24 @@ struct llama_vocab {
 
     std::unordered_map<token, id> token_to_id;
     std::vector<token_score> id_to_token;
+
+    struct token_trie {
+        std::unordered_map<char, token_trie> children;
+        std::vector<llama_vocab::id> tokens;
+
+        void insert(const llama_vocab::token & tok, llama_vocab::id id) {
+            token_trie * node = this;
+            for (char c : tok) {
+                if (node->children.count(c) == 0) {
+                    node->children[c] = token_trie();
+                }
+                node = &node->children.at(c);
+            }
+            node->tokens.push_back(id);
+        }
+    };
+
+    token_trie trie;
 };
 
 struct llama_context {
@@ -465,6 +486,7 @@ struct llama_file_loader {
             }
 
             vocab.token_to_id[word] = i;
+            vocab.trie.insert(word, i);
 
             auto & tok_score = vocab.id_to_token[i];
             tok_score.tok = std::move(word);
@@ -1820,7 +1842,6 @@ void llama_sample_frequency_and_presence_penalties(struct llama_context * ctx, l
     }
 }
 
-
 llama_token llama_sample_token_mirostat(struct llama_context * ctx, llama_token_data_array * candidates, float tau, float eta, int m, float * mu) {
     assert(ctx);
     auto N = float(llama_n_vocab(ctx));
@@ -2793,6 +2814,333 @@ bool llama_save_session_file(struct llama_context * ctx, const char * path_sessi
     }
 
     return true;
+}
+
+//
+// Token constraints
+//
+
+typedef size_t rule_id;
+enum grammar_element_kind {
+    TERMINAL,
+    REFERENCE
+};
+
+struct grammar_element {
+    grammar_element_kind kind;
+    std::vector<char> terminal;
+    rule_id reference;
+
+    grammar_element(std::vector<char> terminal) : kind(grammar_element_kind::TERMINAL), terminal(terminal) {}
+    grammar_element(rule_id reference) : kind(grammar_element_kind::REFERENCE), reference(reference) {}
+
+    grammar_element(const grammar_element& other) {
+        kind = other.kind;
+        if (kind == grammar_element_kind::TERMINAL) {
+            terminal = other.terminal;
+        } else {
+            reference = other.reference;
+        }
+    }
+
+    grammar_element& operator=(const grammar_element& other) {
+        if (this != &other) {
+            kind = other.kind;
+            if (kind == grammar_element_kind::TERMINAL) {
+                terminal = other.terminal;
+            } else {
+                reference = other.reference;
+            }
+        }
+        return *this;
+    }
+
+    bool operator==(const grammar_element& other) const {
+        if (kind != other.kind) {
+            return false;
+        }
+        if (kind == grammar_element_kind::TERMINAL) {
+            return terminal == other.terminal;
+        }
+        return reference == other.reference;
+    }
+};
+
+
+size_t hash_combine(size_t seed, size_t value) {
+    return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+}
+
+typedef std::vector<grammar_element> branch;
+typedef std::vector<branch> rule_body;
+typedef std::unordered_map<rule_id, rule_body> grammar_rules;
+typedef size_t parse_hash;
+struct partial_parse;
+typedef std::unordered_map<parse_hash, partial_parse> partial_parses;
+
+struct partial_parse {
+    std::shared_ptr<grammar_rules> grammar;
+    std::deque<char> remaining_literal;
+    std::deque<grammar_element> remaining_elements;
+
+    partial_parse(std::shared_ptr<grammar_rules> g, std::vector<grammar_element> rem_elements)
+        : grammar(g), remaining_elements(rem_elements.begin(), rem_elements.end()) {}
+
+    size_t hash() const {
+        std::hash<std::underlying_type<grammar_element_kind>::type> enum_hash;
+        size_t seed = 842502087;
+
+        for (const auto& elem : remaining_elements) {
+            seed = hash_combine(seed, enum_hash(static_cast<std::underlying_type<grammar_element_kind>::type>(elem.kind)));
+            
+            if (elem.kind == grammar_element_kind::TERMINAL) {
+                std::hash<char> char_hash;
+                for (const auto& ch : elem.terminal) {
+                    seed = hash_combine(seed, char_hash(ch));
+                }
+            } else if (elem.kind == grammar_element_kind::REFERENCE) {
+                std::hash<rule_id> rule_name_hash;
+                seed = hash_combine(seed, rule_name_hash(elem.reference));
+            }
+        }
+
+        std::hash<char> char_hash;
+        for (const auto& ch : remaining_literal) {
+            seed = hash_combine(seed, char_hash(ch));
+        }
+
+        return seed;
+    }
+
+
+    bool equals(const partial_parse& other) const {
+        return remaining_literal == other.remaining_literal &&
+               remaining_elements == other.remaining_elements;
+    }
+
+    partial_parses accept_char(char c) {
+        partial_parses result;
+        while (remaining_literal.empty()) {
+            if (remaining_elements.empty()) {
+                break;
+            }
+
+            grammar_element elem = remaining_elements.front();
+            remaining_elements.pop_front();
+
+            if (elem.kind == grammar_element_kind::TERMINAL) {
+                for (char ch : elem.terminal) {
+                    remaining_literal.push_back(ch);
+                }
+            } else if (elem.kind == grammar_element_kind::REFERENCE) {
+                auto rule = grammar->find(elem.reference);
+                if (rule != grammar->end()) {
+                    for (const auto& alternative : rule->second) {
+                        partial_parse new_parse(*this);
+                        for (auto it = alternative.rbegin(); it != alternative.rend(); ++it) {
+                            new_parse.remaining_elements.push_front(*it);
+                        }
+                        auto new_result = new_parse.accept_char(c);
+                        result.insert(new_result.begin(), new_result.end());
+                    }
+                    return result;
+                }
+            }
+        }
+
+        if(remaining_literal.empty()) {
+            if (c == '\0') {
+                result.insert({hash(), *this});
+            }
+        } else {
+            if (remaining_literal.front() == c) {
+                remaining_literal.pop_front();
+                result.insert({hash(), *this});
+            }
+        }
+        return result;
+    }
+};
+
+struct token_grammar {
+    partial_parses parse_map;
+
+    token_grammar(rule_id start_rule_name, std::shared_ptr<grammar_rules> grammar) {
+        rule_body start_rule = grammar->at(start_rule_name);
+        for (const auto& alternative : start_rule) {
+            partial_parse parse(grammar, alternative);
+            parse_map.insert({parse.hash(), parse});
+        }
+    }
+
+    token_grammar(const token_grammar& other) {
+        parse_map = other.parse_map;
+    }
+
+    bool accept(char c) {
+        partial_parses new_parse_map;
+        for (auto& parse_entry : parse_map) {
+            auto accepted = parse_entry.second.accept_char(c);
+            new_parse_map.insert(accepted.begin(), accepted.end());
+        }
+        if (new_parse_map.empty()) {
+            return false;
+        }
+        parse_map = new_parse_map;
+        return true;
+    }
+
+    bool accept_str(const char *s) {
+        if(strlen(s) == 0) {
+            return accept('\0');
+        }
+        for (const char *c = s; *c != '\0'; c++) {
+            if (!accept(*c)) {
+                return false;
+            }
+        }
+        return true; 
+    }
+
+    std::unique_ptr<token_grammar> clone() const {
+        return std::unique_ptr<token_grammar>(new token_grammar(*this));
+    }
+
+    // Collect all the tokens that this token filter can accept
+    void collect_ids(const size_t depth, const llama_vocab::token_trie& trie, std::unordered_set<llama_vocab::id>& ids) {
+        // The depth > 0 check is to avoid collecting the empty string unless we are at the root of the trie
+        if(depth > 0 || clone()->accept('\0')) {
+            ids.insert(trie.tokens.begin(), trie.tokens.end());
+        }
+
+        for (auto it = trie.children.begin(); it != trie.children.end(); ++it) {
+            char c = it->first;
+            const auto& child_trie = it->second;
+
+            auto cloned_validator = clone();
+            if(cloned_validator->accept(c)) {
+                cloned_validator->collect_ids(depth+1, child_trie, ids);
+            }
+        }
+    }
+};
+
+// Grammar of the grammar:
+// file: start_rule_name rule_count rule*
+// rule_count: int
+// rule: rule_name rule_body
+// rule_name: int
+// rule_body: alternative_count alternative*
+// alternative_count: int
+// alternative: element_count element*
+// element_count: int
+// element: terminal terminal_value | non_terminal rule_name
+// terminal: 0
+// non_terminal: 1
+// terminal_value: byte_count byte*
+// byte_count: int
+std::unique_ptr<token_grammar> parse_token_grammar(const char *s) {
+    std::shared_ptr<grammar_rules> grammar = std::shared_ptr<grammar_rules>(new grammar_rules());
+    int start_rule_name;
+    int rule_count;
+    int bytes_read;
+    sscanf(s, "%d %d%n", &start_rule_name, &rule_count, &bytes_read);
+    s += bytes_read;
+
+    for (int i = 0; i < rule_count; i++) {
+        rule_id rule_name;
+        int alternative_count;
+        sscanf(s, "%zd %d%n", &rule_name, &alternative_count, &bytes_read);
+        s += bytes_read;
+
+        rule_body production_rule;
+
+        for (int j = 0; j < alternative_count; j++) {
+            int element_count;
+            sscanf(s, "%d%n", &element_count, &bytes_read);
+            s += bytes_read;
+
+            branch alternative;
+
+            for (int k = 0; k < element_count; k++) {
+                int element_type;
+                sscanf(s, "%d%n", &element_type, &bytes_read);
+                s += bytes_read;
+
+                if (element_type == 0) {
+                    int byte_count;
+                    sscanf(s, "%d%n", &byte_count, &bytes_read);
+                    s += bytes_read;
+
+                    std::vector<char> bytes;
+                    for (int l = 0; l < byte_count; l++) {
+                        int byte_int;
+                        sscanf(s, "%d%n", &byte_int, &bytes_read);
+                        s += bytes_read;
+                        bytes.push_back((char) byte_int);
+                    }
+                    grammar_element element_data(bytes);
+                    alternative.push_back(element_data);
+                } else if (element_type == 1) {
+                    rule_id rule_name;
+                    sscanf(s, "%zd%n", &rule_name, &bytes_read);
+                    s += bytes_read;
+                    grammar_element element_data(rule_name);
+                    alternative.push_back(element_data);
+                } else {
+                    fprintf(stderr, "%s: Invalid element type: %d\n", __func__, element_type);
+                    throw std::runtime_error("Invalid element type");
+                }
+
+            }
+
+            production_rule.push_back(alternative);
+        }
+
+        grammar->insert({rule_name, production_rule});
+    }
+
+    auto token_grammar_instance = std::unique_ptr<token_grammar>(new token_grammar(start_rule_name, grammar));
+    return token_grammar_instance;
+}
+
+void* llama_load_token_grammar_from_path(const char *path) {
+    llama_file file(path, "rb");
+    std::string s = file.read_string(file.size);
+    const char *c = s.c_str();
+    std::unique_ptr<token_grammar> unique_validator = parse_token_grammar(c);
+    return unique_validator.release();
+}
+
+void llama_grammar_penalty(struct llama_context * ctx, llama_token_data_array * candidates, const void* filter_ptr) {
+    if(!filter_ptr) {
+        return;
+    }
+
+    const auto *filter = static_cast<const token_grammar*>(filter_ptr);
+
+    std::unordered_set<llama_vocab::id> valid_ids;
+    filter->clone()->collect_ids(0, ctx->vocab.trie, valid_ids);
+
+    for (size_t i = 0; i < candidates->size; ++i) {
+        auto candidate = candidates->data[i].id;
+        auto as_str = ctx->vocab.id_to_token[candidate].tok.c_str();
+        if (valid_ids.find(candidate) == valid_ids.end()) {
+            candidates->data[i].logit -= 1000.0f;
+        }
+    }
+}
+
+void llama_grammar_accept_token(struct llama_context * ctx, llama_token id, void* filter_ptr) {
+    if(!filter_ptr) {
+        return;
+    }
+
+    auto *filter = static_cast<token_grammar*>(filter_ptr);
+    auto as_str = ctx->vocab.id_to_token[id].tok.c_str();
+    if (!filter->accept_str(as_str)) {
+        throw std::runtime_error("filter rejected token");
+    }
 }
 
 int llama_eval(

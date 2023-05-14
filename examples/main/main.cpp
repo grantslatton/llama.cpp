@@ -117,6 +117,15 @@ int main(int argc, char ** argv) {
                 params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
     }
 
+
+    // load input from params.validator_path
+    std::string token_grammar_path = params.token_grammar_path;
+    void* grammar = nullptr;
+    if (!token_grammar_path.empty()) {
+        fprintf(stderr, "%s: attempting to parse token grammar from '%s'\n", __func__, token_grammar_path.c_str());
+        grammar = llama_load_token_grammar_from_path(token_grammar_path.c_str());
+    }
+
     // determine the maximum memory usage needed to do inference for the given n_batch and n_predict parameters
     // uncomment the "used_mem" line in llama.cpp to see the results
     if (params.mem_test) {
@@ -420,6 +429,7 @@ int main(int argc, char ** argv) {
                 llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
 
                 // Apply penalties
+                llama_grammar_penalty(ctx, &candidates_p, grammar);
                 float nl_logit = logits[llama_token_nl()];
                 auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
                 llama_sample_repetition_penalty(ctx, &candidates_p,
@@ -459,6 +469,7 @@ int main(int argc, char ** argv) {
 
                 last_n_tokens.erase(last_n_tokens.begin());
                 last_n_tokens.push_back(id);
+                llama_grammar_accept_token(ctx, id, grammar);
             }
 
             // replace end of text token with newline token when in interactive mode

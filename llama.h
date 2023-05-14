@@ -191,6 +191,10 @@ extern "C" {
     LLAMA_API llama_token llama_token_eos();
     LLAMA_API llama_token llama_token_nl();
 
+    void* llama_load_token_grammar_from_path(const char *path);
+    LLAMA_API void llama_grammar_penalty(struct llama_context * ctx, llama_token_data_array * candidates, const void* filter_ptr);
+    LLAMA_API void llama_grammar_accept_token(struct llama_context * ctx, llama_token id, void* filter_ptr);
+
     // Sampling functions
 
     /// @details Repetition penalty described in CTRL academic paper https://arxiv.org/abs/1909.05858, with negative logit fix.

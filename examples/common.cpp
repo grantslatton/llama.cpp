@@ -231,7 +231,13 @@ bool gpt_params_parse(int argc, char ** argv, gpt_params & params) {
                 break;
             }
             params.mirostat_tau = std::stof(argv[i]);
-        } else if (arg == "-b" || arg == "--batch-size") {
+        } else if (arg == "--grammar") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            params.token_grammar_path = argv[i];
+        } else if (arg == "-b" || arg == "--batch_size") {
             if (++i >= argc) {
                 invalid_param = true;
                 break;

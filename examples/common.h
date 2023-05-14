@@ -48,8 +48,9 @@ struct gpt_params {
     std::string model  = "models/lamma-7B/ggml-model.bin"; // model path
     std::string prompt = "";
     std::string path_prompt_cache = "";  // path to file for saving/loading prompt eval state
-    std::string input_prefix      = "";  // string to prefix user inputs with
-    std::string input_suffix      = "";  // string to suffix user inputs with
+    std::string token_grammar_path = "";     // path to file containing serialized token validator
+    std::string input_prefix = "";       // string to prefix user inputs with
+    std::string input_suffix = "";       // string to suffix user inputs with
     std::vector<std::string> antiprompt; // string upon seeing which more user input is prompted
 
     std::string lora_adapter = "";  // lora adapter path
