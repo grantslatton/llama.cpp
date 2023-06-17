@@ -1,4 +1,4 @@
-type CittyData = {
+type CityData = {
    "city_name": string,
    "country": string,
    "reasons_to_visit": {
