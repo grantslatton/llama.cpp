@@ -205,16 +205,16 @@ struct llama_vocab {
     std::vector<token_score> id_to_token;
 
     struct token_trie {
-        std::unordered_map<char, token_trie> children;
+        std::unordered_map<char, token_trie*> children;
         std::vector<llama_vocab::id> tokens;
 
         void insert(const llama_vocab::token & tok, llama_vocab::id id) {
             token_trie * node = this;
             for (char c : tok) {
                 if (node->children.count(c) == 0) {
-                    node->children[c] = token_trie();
+                    node->children[c] = new token_trie();
                 }
-                node = &node->children.at(c);
+                node = node->children.at(c);
             }
             node->tokens.push_back(id);
         }
@@ -3019,7 +3019,7 @@ struct token_grammar {
 
             auto cloned_validator = clone();
             if(cloned_validator->accept(c)) {
-                cloned_validator->collect_ids(depth+1, child_trie, ids);
+                cloned_validator->collect_ids(depth+1, *child_trie, ids);
             }
         }
     }

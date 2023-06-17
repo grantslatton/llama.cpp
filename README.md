@@ -546,3 +546,19 @@ docker run -v /path/to/models:/models ghcr.io/ggerganov/llama.cpp:light -m /mode
 ### Docs
 
 - [GGML tips & tricks](https://github.com/ggerganov/llama.cpp/wiki/GGML-Tips-&-Tricks)
+
+### Grammar Constraints
+
+See https://twitter.com/GrantSlatton/status/1657559506069463040
+
+Compile with `grammar.py` eg
+
+```
+python3 grammar.py --grammar example-grammar_revolution.txt > compiled_revolution
+
+python3 grammar.py --json example-grammar_tourism-json.txt > compiled_tourism
+```
+
+When running, pass the constraining grammar with `--grammar <file>`, and use `-p prompt` to provide the context for the output
+
+eg `./main -m ./models/7B/ggml-model-q4_0.bin -c 512 -b 1024 -n 256 --keep 48 --grammar compiled_tourism -p "Sydney"`
