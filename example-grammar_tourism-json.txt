@@ -1,0 +1,8 @@
+type CittyData = {
+   "city_name": string,
+   "country": string,
+   "reasons_to_visit": {
+      "perecent_sunny_days": number,
+      "top_3_tourist_attractions": [string, string, string],
+   },
+};

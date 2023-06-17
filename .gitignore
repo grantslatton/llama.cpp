@@ -37,6 +37,7 @@ models/*
 build-info.h
 arm_neon.h
 compile_commands.json
+compiled_*
 
 __pycache__
 
